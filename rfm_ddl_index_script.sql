@@ -140,33 +140,157 @@ CREATE TABLE IF NOT EXISTS RFM_analysis.fact_transactions (
 
 -- ==========================================
 -- 6. HIGH-SPEED IN-MEMORY DATA POPULATION (800K)
+-- ========================================== 
+
+--script1 : 
 -- ==========================================
-WITH indexed_accounts AS (
-    -- Gathers accounts paired down with geographic context via customer joins
+-- REVISED HIGH-SPEED IN-MEMORY DATA POPULATION 
+-- Features: Variable transaction counts (5 to 15 per account) 
+-- and Clustered/Sparse Date Distribution (Burst activity, gaps in-between)
+-- ==========================================
+
+WITH account_transaction_targets AS (
+    -- Assigns a randomized transaction count between 5 and 15 per account
     SELECT 
         a.account_id, 
         a.account_number, 
-        a.product_code, -- Pulled directly from the account dimension row
+        a.product_code, 
         c.city, 
         c.state, 
-        ROW_NUMBER() OVER (ORDER BY a.account_id) AS account_idx 
+        5 + (ABS(HASHTEXT(a.account_number)) % 11) AS target_trx_count
     FROM RFM_analysis.dim_accounts a
     JOIN RFM_analysis.dim_customers c ON a.customer_id = c.customer_id
-), seq_generator AS (
+), 
+expanded_sequence AS (
+    -- Expands each account into its specific subset of transaction rows
+    SELECT 
+        act.account_id,
+        act.account_number,
+        act.product_code,
+        act.city,
+        act.state,
+        s.n AS seq_n
+    FROM account_transaction_targets act
+    CROSS JOIN LATERAL generate_series(1, act.target_trx_count) s(n)
+)
+INSERT INTO RFM_analysis.fact_transactions (
+    account_id, 
+    product_code, 
+    merchant_code, 
+    merchant_code_description,
+    credit_card_number, 
+    trnx_id, 
+    trnx_amt, 
+    trnx_date, 
+    trx_timestamp, 
+    location_zipcode, 
+    ip_address,
+    credit_line,
+    fees, 
+    interest, 
+    credits, 
+    previous_balance, 
+    status
+)
+SELECT 
+    seq.account_id,
+    seq.product_code,
+    
+    -- 1. Merchant Code Mapping
+    CASE (seq.seq_n % 16)
+        WHEN 0 THEN '9135' WHEN 1 THEN '9136' WHEN 2 THEN '9137' WHEN 3 THEN '9138'
+        WHEN 4 THEN '9139' WHEN 5 THEN '9140' WHEN 6 THEN '9141' WHEN 7 THEN '9142'
+        WHEN 8 THEN '9143' WHEN 9 THEN '9144' WHEN 10 THEN '9145' WHEN 11 THEN '9146'
+        WHEN 12 THEN '9147' WHEN 13 THEN '9148' WHEN 14 THEN '9149' ELSE '9150'
+    END AS merchant_code,
+    
+    -- 2. Merchant Description Mapping
+    CASE (seq.seq_n % 16)
+        WHEN 0 THEN 'Merchandise & Supplies - Groceries'
+        WHEN 1 THEN 'Merchandise & Supplies - Department Stores'
+        WHEN 2 THEN 'Other - Charities'
+        WHEN 3 THEN 'Other - Religious Food Stores'
+        WHEN 4 THEN 'Merchandise & Supplies - Clothing Stores'
+        WHEN 5 THEN 'Merchandise & Supplies - Wholesale - Stores(Target)'
+        WHEN 6 THEN 'Fees & Adjustments - fees & Adjustments (rewards/refund)'
+        WHEN 7 THEN 'Merchandise & Supplies - Hardware Supplies'
+        WHEN 8 THEN 'Business Services - Contracting Services'
+        WHEN 9 THEN 'Restaurant - Restaurant'
+        WHEN 10 THEN 'Transportation - Rail Services'
+        WHEN 11 THEN 'Transportation - Parking Charges'
+        WHEN 12 THEN 'Restaurant - Bar & Cafe'
+        WHEN 13 THEN 'Transportation - Airlines Services'
+        WHEN 14 THEN 'Entertainment - Movies'
+        ELSE 'Merchandise & Supplies - Medical Services'
+    END AS merchant_code_description,
+
+    '37' || LPAD(CAST((ABS(HASHTEXT(seq.account_number || seq.seq_n)) % 10000000000001) AS TEXT), 13, '0') AS credit_card_number, 
+    gen_random_uuid() AS trnx_id, 
+    ROUND(CAST(10.00 + (RANDOM() * 1490.00) AS NUMERIC), 2) AS trnx_amt, 
+    
+    -- 3. Clustered Date Logic: Skips weeks, forces bursts (First 2 weeks vs Last 2 weeks of a monthly window)
+    ('2024-12-01'::date + INTERVAL '1 day' * (
+        CASE 
+            WHEN (ABS(HASHTEXT(seq.account_number || seq.seq_n)) % 2) = 0 
+                THEN (ABS(HASHTEXT(seq.seq_n::text)) % 14) -- First 2 weeks burst (Days 0-13)
+            ELSE 
+                15 + (ABS(HASHTEXT(seq.seq_n::text)) % 15) -- Last 2 weeks burst (Days 15-29)
+        END + (30 * (ABS(HASHTEXT(seq.account_number)) % 14)) -- Shifts across the 14-month window
+    )) AS trnx_date, 
+    
+    CURRENT_TIMESTAMP - INTERVAL '1 minute' * (seq.seq_n % 525600) AS trx_timestamp, 
+    
+    -- 4. Geographic Zip Codes Across NY, NC, TX, MA, AZ
+    CASE (seq.seq_n % 5)
+        WHEN 0 THEN CAST(FLOOR(10001 + (RANDOM() * 483)) AS TEXT) 
+        WHEN 1 THEN CAST(FLOOR(27001 + (RANDOM() * 800)) AS TEXT) 
+        WHEN 2 THEN CAST(FLOOR(75001 + (RANDOM() * 999)) AS TEXT) 
+        WHEN 3 THEN '0' || CAST(FLOOR(1001 + (RANDOM() * 1200)) AS TEXT) 
+        ELSE CAST(FLOOR(85001 + (RANDOM() * 500)) AS TEXT) 
+    END AS location_zipcode, 
+    
+    '192.168.' || (seq.seq_n % 255) || '.' || ((seq.seq_n * 7) % 255) AS ip_address, 
+    'Credit_card' AS credit_line, 
+    CASE WHEN (seq.seq_n % 10) = 0 THEN 39.00 ELSE 0.00 END AS fees, 
+    CASE WHEN (seq.seq_n % 8) = 0 THEN ROUND(CAST((RANDOM() * 50.00) AS NUMERIC), 2) ELSE 0.00 END AS interest, 
+    CASE WHEN (seq.seq_n % 4) = 0 THEN ROUND(CAST((RANDOM() * 200.00) AS NUMERIC), 2) ELSE 0.00 END AS credits, 
+    ROUND(CAST((RANDOM() * 3000.00) AS NUMERIC), 2) AS previous_balance, 
+    
+    CASE 
+        WHEN (seq.seq_n % 50) = 0 THEN 'DUPLICATE_BATCH' 
+        WHEN (seq.seq_n % 20) = 0 THEN 'CHARGEBACK_PROCESSED' 
+        WHEN (seq.seq_n % 5) = 0 THEN 'DECLINED' 
+        ELSE 'APPROVED' 
+    END AS status 
+FROM expanded_sequence seq;
+--script 2 :
+WITH indexed_accounts AS (
+    SELECT 
+        a.account_id, 
+        a.account_number, 
+        a.product_code, 
+        c.city, 
+        c.state, 
+        ROW_NUMBER() OVER (ORDER BY a.account_id) AS account_idx
+    FROM RFM_analysis.dim_accounts a
+    JOIN RFM_analysis.dim_customers c ON a.customer_id = c.customer_id
+), 
+seq_generator AS (
     SELECT generate_series AS n FROM generate_series(1, 800000)
 )
 INSERT INTO RFM_analysis.fact_transactions (
     account_id, 
     product_code, 
     merchant_code, 
+    merchant_code_description,
     credit_card_number, 
-    transaction_id, 
-    transaction_amt, 
-    transaction_date, 
+    trnx_id, 
+    trnx_amt, 
+    trnx_date, 
     trx_timestamp, 
-    location, 
-    ip_address, 
-    -- credit_line was removed here to match your updated clean schema
+    location_zipcode, 
+    ip_address,
+    credit_line,
     fees, 
     interest, 
     credits, 
@@ -175,37 +299,78 @@ INSERT INTO RFM_analysis.fact_transactions (
 )
 SELECT 
     a.account_id,
-    a.product_code, -- Safely routes transactions into codes 101, 102, 103, and 104
-    CASE (seq.n % 6) 
-        WHEN 0 THEN 'RETAIL_SHOPPING' 
-        WHEN 1 THEN 'TRAVEL_AIRLINES' 
-        WHEN 2 THEN 'DINING_RESTAURANTS' 
-        WHEN 3 THEN 'GROCERY_SUPERMARKET' 
-        WHEN 4 THEN 'GAS_STATION' 
-        ELSE 'DIGITAL_SUBSCRIPTION' 
+    a.product_code,
+    
+    -- 1. Merchant Code Mapping
+    CASE (seq.n % 16)
+        WHEN 0 THEN '9135' WHEN 1 THEN '9136' WHEN 2 THEN '9137' WHEN 3 THEN '9138'
+        WHEN 4 THEN '9139' WHEN 5 THEN '9140' WHEN 6 THEN '9141' WHEN 7 THEN '9142'
+        WHEN 8 THEN '9143' WHEN 9 THEN '9144' WHEN 10 THEN '9145' WHEN 11 THEN '9146'
+        WHEN 12 THEN '9147' WHEN 13 THEN '9148' WHEN 14 THEN '9149' ELSE '9150'
     END AS merchant_code,
-    '37' || LPAD(CAST((ABS(HASHTEXT(a.account_number || seq.n)) % 10000000000001) AS TEXT), 13, '0') AS credit_card_number,
-    gen_random_uuid() AS transaction_id,
-    ROUND(CAST(10.00 + (RANDOM() * 1490.00) AS NUMERIC), 2) AS transaction_amt,
-    CURRENT_DATE - INTERVAL '1 day' * (seq.n % 365) AS transaction_date,
-    CURRENT_TIMESTAMP - INTERVAL '1 minute' * (seq.n % 525600) AS trx_timestamp,
-    a.city || ', ' || a.state AS location,
-    '192.168.' || (seq.n % 255) || '.' || ((seq.n * 7) % 255) AS ip_address,
-    CASE WHEN (seq.n % 10) = 0 THEN 39.00 ELSE 0.00 END AS fees,
-    CASE WHEN (seq.n % 8) = 0 THEN ROUND(CAST((RANDOM() * 50.00) AS NUMERIC), 2) ELSE 0.00 END AS interest,
-    CASE WHEN (seq.n % 4) = 0 THEN ROUND(CAST((RANDOM() * 200.00) AS NUMERIC), 2) ELSE 0.00 END AS credits,
-    ROUND(CAST((RANDOM() * 3000.00) AS NUMERIC), 2) AS previous_balance,
+    
+    -- 2. Merchant Description Mapping
+    CASE (seq.n % 16)
+        WHEN 0 THEN 'Merchandise & Supplies - Groceries'
+        WHEN 1 THEN 'Merchandise & Supplies - Department Stores'
+        WHEN 2 THEN 'Other - Charities'
+        WHEN 3 THEN 'Other - Religious Food Stores'
+        WHEN 4 THEN 'Merchandise & Supplies - Clothing Stores'
+        WHEN 5 THEN 'Merchandise & Supplies - Wholesale - Stores(Target)'
+        WHEN 6 THEN 'Fees & Adjustments - fees & Adjustments (rewards/refund)'
+        WHEN 7 THEN 'Merchandise & Supplies - Hardware Supplies'
+        WHEN 8 THEN 'Business Services - Contracting Services'
+        WHEN 9 THEN 'Restaurant - Restaurant'
+        WHEN 10 THEN 'Transportation - Rail Services'
+        WHEN 11 THEN 'Transportation - Parking Charges'
+        WHEN 12 THEN 'Restaurant - Bar & Cafe'
+        WHEN 13 THEN 'Transportation - Airlines Services'
+        WHEN 14 THEN 'Entertainment - Movies'
+        ELSE 'Merchandise & Supplies - Medical Services'
+    END AS merchant_code_description,
+
+    '37' || LPAD(CAST((ABS(HASHTEXT(a.account_number || seq.n)) % 10000000000001) AS TEXT), 13, '0') AS credit_card_number, 
+    gen_random_uuid() AS trnx_id, 
+    ROUND(CAST(10.00 + (RANDOM() * 1490.00) AS NUMERIC), 2) AS trnx_amt, 
+    
+    -- 3. Clustered Date Logic: Burst activity in first 2 weeks or last 2 weeks with gaps across the 14-month window
+    ('2024-12-01'::date + INTERVAL '1 day' * (
+        CASE 
+            WHEN (ABS(HASHTEXT(a.account_number || seq.n)) % 2) = 0 
+                THEN (ABS(HASHTEXT(seq.n::text)) % 14) -- First 2 weeks burst (Days 0-13)
+            ELSE 
+                15 + (ABS(HASHTEXT(seq.n::text)) % 15) -- Last 2 weeks burst (Days 15-29)
+        END + (30 * (ABS(HASHTEXT(a.account_number || seq.n)) % 14)) -- Shifts across the 14-month window
+    )) AS trnx_date, 
+    
+    CURRENT_TIMESTAMP - INTERVAL '1 minute' * (seq.n % 525600) AS trx_timestamp, 
+    
+    -- 4. Geographic Zip Codes Across NY, NC, TX, MA, AZ
+    CASE (seq.n % 5)
+        WHEN 0 THEN CAST(FLOOR(10001 + (RANDOM() * 483)) AS TEXT) 
+        WHEN 1 THEN CAST(FLOOR(27001 + (RANDOM() * 800)) AS TEXT) 
+        WHEN 2 THEN CAST(FLOOR(75001 + (RANDOM() * 999)) AS TEXT) 
+        WHEN 3 THEN '0' || CAST(FLOOR(1001 + (RANDOM() * 1200)) AS TEXT) 
+        ELSE CAST(FLOOR(85001 + (RANDOM() * 500)) AS TEXT) 
+    END AS location_zipcode, 
+    
+    '192.168.' || (seq.n % 255) || '.' || ((seq.n * 7) % 255) AS ip_address, 
+    'Credit_card' AS credit_line, 
+    CASE WHEN (seq.n % 10) = 0 THEN 39.00 ELSE 0.00 END AS fees, 
+    CASE WHEN (seq.n % 8) = 0 THEN ROUND(CAST((RANDOM() * 50.00) AS NUMERIC), 2) ELSE 0.00 END AS interest, 
+    CASE WHEN (seq.n % 4) = 0 THEN ROUND(CAST((RANDOM() * 200.00) AS NUMERIC), 2) ELSE 0.00 END AS credits, 
+    ROUND(CAST((RANDOM() * 3000.00) AS NUMERIC), 2) AS previous_balance, 
+    
     CASE 
-        WHEN (seq.n % 20) = 0 THEN -2 
-        WHEN (seq.n % 5) = 0 THEN -1 
-        WHEN (seq.n % 3) = 0 THEN 0 
-        WHEN (seq.n % 15) = 0 THEN 1 
-        WHEN (seq.n % 50) = 0 THEN 3 
-        ELSE 0 
-    END AS status
+        WHEN (seq.n % 50) = 0 THEN 'DUPLICATE_BATCH' 
+        WHEN (seq.n % 20) = 0 THEN 'CHARGEBACK_PROCESSED' 
+        WHEN (seq.n % 5) = 0 THEN 'DECLINED' 
+        ELSE 'APPROVED' 
+    END AS status 
 FROM seq_generator seq
--- Direct join based on index calculations ensures 100% processing speed
-JOIN indexed_accounts a ON a.account_idx = ((seq.n % 30000) + 1);
+-- Distributes the exact 800,000 sequence rows unevenly across the 30,000 accounts using a prime multiplier offset
+JOIN indexed_accounts a ON a.account_idx = ((seq.n * 17) % 30000) + 1; 
+
 
 
 -- ==========================================
