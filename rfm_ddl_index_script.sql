@@ -20,7 +20,6 @@ VALUES
     (104, 'Amex_Gold_Card', 15000.00, 0.00, 4.00)
 ON CONFLICT (product_code) DO NOTHING;
 
-
 -- ==========================================
 -- 2. CREATE DIMENSION: CUSTOMERS (~30K profiles)
 -- ==========================================
@@ -54,11 +53,6 @@ CREATE TABLE IF NOT EXISTS RFM_analysis.dim_accounts (
     account_start_date DATE,
     account_end_date DATE
 );
-
--- ==========================================
--- ==========================================
--- 4. SEED THE DIMENSION DATA (30K Customers + Accounts)
--- ==========================================
 -- 4. Seed both tables concurrently using a synchronized CTE
 WITH unique_rows AS (
     SELECT 
@@ -111,33 +105,35 @@ SELECT
     NULL AS account_end_date
 FROM unique_rows u; 
 
--- ==========================================
--- 5. CREATE FACT TABLE: TRANSACTIONS (Targeting 800K rows)
--- ==========================================
+select count(*) from RFM_ANALYSIS.dim_customers
+
+
+---- creating fact_table, inserting reocrds & indexing 
 CREATE TABLE IF NOT EXISTS RFM_analysis.fact_transactions (
     id SERIAL PRIMARY KEY,
     account_id UUID, -- Updated target column to follow account architecture
     product_code INT,
     merchant_code VARCHAR(50),
+	merchant_code_description varchar(175),
     credit_card_number VARCHAR(15),
-    transaction_id UUID,
-    transaction_amt DECIMAL(10,2),
-    transaction_date DATE,
+    trnx_id UUID,
+    trnx_amt DECIMAL(10,2),
+    trnx_date DATE,
     trx_timestamp TIMESTAMP,
-    location VARCHAR(100),
+    location_zipcode varchar(50),
     ip_address VARCHAR(45),
-    credit_line DECIMAL(12,2),
+    credit_line varchar(50),
     fees DECIMAL(10,2),
     interest DECIMAL(10,2),
     credits DECIMAL(10,2),
     previous_balance DECIMAL(12,2),
-    status INT,
+    status VARCHAR(50),
     
     -- Clean explicit foreign key constraints 
     CONSTRAINT fk_fact_transactions_accounts FOREIGN KEY (account_id) REFERENCES RFM_analysis.dim_accounts(account_id),
     CONSTRAINT fk_fact_transactions_products FOREIGN KEY (product_code) REFERENCES RFM_analysis.dim_products(product_code)
 );
-
+select count(*) from RFM_analysis.fact_transactions 
 
 -- ==========================================
 -- 6. HIGH-SPEED IN-MEMORY DATA POPULATION (800K)
@@ -384,18 +380,14 @@ CREATE INDEX idx_fact_trx_product_code ON RFM_analysis.fact_transactions (produc
 CREATE INDEX idx_dim_accounts_customer_id ON RFM_analysis.dim_accounts (customer_id);
 
 -- Speed up filtering by transaction dates & processing status for RFM extraction scripts
-CREATE INDEX idx_fact_trx_date_status ON RFM_analysis.fact_transactions (transaction_date, status);
+CREATE INDEX idx_fact_trx_date_status ON RFM_analysis.fact_transactions (trnx_date, status);
 
 -- Composite Index for analyzing a single active Account's sequential spending trends
-CREATE INDEX idx_fact_trx_acct_date ON RFM_analysis.fact_transactions (account_id, transaction_date);
-
-select * from RFM_analysis.fact_transactions 
-limit 100
+CREATE INDEX idx_fact_trx_acct_date ON RFM_analysis.fact_transactions (account_id, trnx_date);
 -- Analytical Geography Index for regional segmentation dashboards
 CREATE INDEX idx_dim_customers_geo ON RFM_analysis.dim_customers (country, state, city);
 
-CREATE INDEX idx_dim_accounts_product_code ON RFM_analysis.dim_accounts (product_code);
+CREATE INDEX idx_dim_accounts_product_code ON RFM_analysis.dim_accounts (product_code); 
 
--- dropping the table columns which are redundant
-
--- 2. Remove the redundant credit line column
+COPY RFM_ANALYSIS.fact_transactions
+TO '/Users/rohinisaichandramunnangi/Downloads/fact_transactions.csv' WITH (FORMAT CSV, HEADER); 
