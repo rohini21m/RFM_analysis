@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS RFM_analysis.dim_accounts (
     -- Added product_code here to declare what product this account uses
     product_code INT REFERENCES RFM_analysis.dim_products(product_code), 
     account_number VARCHAR(20) UNIQUE, 
-    account_type VARCHAR(20), -- 'Credit Card', 'Checking', etc.
+    account_type VARCHAR(20), -- credit-card 
     account_start_date DATE,
     account_end_date DATE
 );
@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS RFM_analysis.dim_accounts (
 -- ==========================================
 -- 4. SEED THE DIMENSION DATA (30K Customers + Accounts)
 -- ==========================================
+-- 4. Seed both tables concurrently using a synchronized CTE
 WITH unique_rows AS (
-    -- Step 1: Only generate data for account numbers that do NOT already exist in the database
     SELECT 
         gen_random_uuid() AS customer_id,
         gen_random_uuid() AS account_id,
@@ -75,16 +75,19 @@ WITH unique_rows AS (
         LPAD(CAST(10001 + (n % 80000) AS TEXT), 5, '0') AS zipcode,
         'AMEX-' || LPAD(CAST(n AS TEXT), 8, '0') AS account_number,
         CASE (n % 2) WHEN 0 THEN 'Credit Card' ELSE 'Checking' END AS account_type,
-        101 + (n % 4) AS product_code, 
+        
+        -- Skewed Product Distribution Weights: ~40% (101), ~25% (102), ~22% (104), ~13% (103)
+        CASE 
+            WHEN (n % 100) < 40 THEN 101
+            WHEN (n % 100) < 65 THEN 102
+            WHEN (n % 100) < 87 THEN 104
+            ELSE 103
+        END AS product_code, 
+        
         CURRENT_DATE - INTERVAL '1 day' * (30 + (n % 700)) AS account_start_date
     FROM generate_series(1, 30000) AS n
-    WHERE NOT EXISTS (
-        SELECT 1 FROM RFM_analysis.dim_accounts a 
-        WHERE a.account_number = 'AMEX-' || LPAD(CAST(n AS TEXT), 8, '0')
-    )
 ),
 inserted_customers AS (
-    -- Step 2: Insert unique customers into the dimension table
     INSERT INTO RFM_analysis.dim_customers (
         customer_id, customer_age, marital_status, customer_contact_no, 
         customer_email, customer_birthdate, state, city, country, zipcode
@@ -95,7 +98,6 @@ inserted_customers AS (
     FROM unique_rows
     RETURNING customer_id
 )
--- Step 3: Insert matching unique accounts safely
 INSERT INTO RFM_analysis.dim_accounts (
     account_id, customer_id, product_code, account_number, account_type, account_start_date, account_end_date
 )
@@ -107,8 +109,7 @@ SELECT
     u.account_type,
     u.account_start_date,
     NULL AS account_end_date
-FROM unique_rows u
-WHERE u.customer_id IN (SELECT customer_id FROM inserted_customers);
+FROM unique_rows u; 
 
 -- ==========================================
 -- 5. CREATE FACT TABLE: TRANSACTIONS (Targeting 800K rows)
@@ -398,14 +399,3 @@ CREATE INDEX idx_dim_accounts_product_code ON RFM_analysis.dim_accounts (product
 -- dropping the table columns which are redundant
 
 -- 2. Remove the redundant credit line column
-ALTER TABLE rfm_analysis.fact_transactions 
-DROP COLUMN credit_line; 
-
-select product_code, count(account_id) as accounts_per_product_line
-from RFM_analysis.fact_transactions 
-group by product_code
-
-select distinct product_code--, count(account_id) as accounts_per_product_line
-from RFM_analysis.fact_transactions
-
-drop table RFM_analysis.fact_transactions
